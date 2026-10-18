@@ -1,0 +1,204 @@
+---
+title: "Can every number in a coach report be trusted?"
+subtitle: "Project 13: a data quality layer for a baseball training facility"
+author: "Luke Wolff, BSF Performance"
+date: last-modified
+format:
+  html:
+    embed-resources: true
+    toc: true
+    theme: cosmo
+    fig-width: 7
+    fig-height: 3.6
+    fig-dpi: 150
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{r setup}
+source("../synthetic/simulate_facility.R")
+source("R/checks.R")
+library(ggplot2)
+
+clean <- simulate_facility(seed = 2026)
+broken <- simulate_facility(seed = 2026, inject_errors = TRUE)
+res_clean <- run_checks(clean)
+res_broken <- run_checks(broken)
+rates <- yaml::read_yaml("results/error_rates.yml")
+
+# Two validated categorical slots (blue, orange) plus recessive ink.
+blue <- "#2a78d6"
+orange <- "#eb6834"
+ink <- "#52514e"
+theme_report <- theme_minimal(base_size = 11) +
+  theme(panel.grid.minor = element_blank(),
+        panel.grid.major.x = element_blank(),
+        panel.grid.major.y = element_line(colour = "#e6e5e1", linewidth = 0.3),
+        axis.text = element_text(colour = ink),
+        axis.title = element_text(colour = ink),
+        strip.text = element_text(face = "bold", hjust = 0),
+        plot.title = element_text(face = "bold"),
+        plot.title.position = "plot")
+```
+
+## Why this matters
+
+A facility's analytics platform pulls from several feeds at once: a pitch tracker, force
+plates, hand-entered range-of-motion measurements and a roster. When one feed goes wrong
+the report usually still looks fine; it is just wrong. A coach who catches one bad number
+stops trusting all of them.
+
+This project is an automated set of checks that runs on every data load and stops bad
+numbers before they reach a report, plus a test harness that proves each check works.
+
+## What the real data showed
+
+The same checks were run on a real facility's archive: about 200,000 pitches and 1,900
+force-plate trials. These are rounded results. Five of the ten checks found real problems.
+
+- **Fields that were never filled.** The tracker's team field and all three game-outcome
+  fields (pitch result, batter, exit speed) were 0% populated. Code that used the team
+  field to tell high school from college athletes was silently wrong.
+- **Identities that don't connect.** About 3 in 4 tracker ids, holding two-thirds of the
+  pitches, link to no athlete in the force-plate system. Those pitches can't be used in any
+  analysis that needs age or level.
+- **Evening tests on the wrong day.** Force-plate times are stored in UTC, so a 7 pm test
+  in the Central time zone is already tomorrow. Read the simple way, about 1 in 6 athlete
+  test-days lands on the wrong date.
+- **Short force tests.** About 1 in 9 jump and push-up tests was saved with fewer than the
+  three trials the protocol calls for.
+- **Small things.** 35 spin readings above 4,000 rpm (under 0.1% of pitches), 0.3% of pitch
+  rows with no pitch id, and no pitch loaded twice.
+
+**A documented "fact" that didn't hold.** 56% of pitches have no pitch-type tag. An
+earlier analysis had found slower throwers tagged more often (r = -0.29). Run on the full
+archive, the tagging-bias check found no real link to velocity (r = -0.05) and passes.
+What is uneven is *who* gets tagged: the facility's own athletes about 69% of the time,
+other pitchers on the tracker about 43%. Velocity doesn't wait on tags either way: an
+all-pitch 95th percentile matched tagged-fastball velocity at r = 0.997 (mean error 0.5 mph).
+
+## The checks
+
+| Check | What it catches | Written in |
+|---|---|---|
+| Empty columns | A field that is never filled | R |
+| Impossible values | Velocity, spin, jump height or range of motion outside physical limits | SQL (and separately in `pointblank`) |
+| Duplicate rows | The same pitch loaded twice when exports overlap | SQL |
+| Unlinked tracker ids | Pitches that map to no athlete | SQL |
+| Orphan links | Links to athletes missing from the roster | SQL |
+| Time-zone day shift | Tests filed under the UTC day instead of the local day | R |
+| Biased tag missingness | Tags missing more for faster (or slower) pitchers | R, correlation across pitchers |
+| Device drift | A force plate whose readings creep over time | R, recent vs earlier sessions |
+| Incomplete sessions | Force tests saved with fewer trials than the protocol | SQL |
+| Out-of-range dates | Dates before the system existed or after today | SQL |
+
+Every threshold lives in one settings file (`checks.yml`), not in the code.
+
+## Testing the checks on a simulated facility
+
+Real athlete data stays private, so the checks are tested on a simulated facility: `r nrow(clean$roster)`
+athletes, `r format(nrow(clean$pitches), big.mark = ",")` pitches and
+`r nrow(clean$force_trials)` force-plate trials, shaped like the real tables. The simulator
+can also plant one kind of error for each check, and it keeps an answer key of exactly
+what it planted.
+
+```{r results-table}
+tbl <- merge(res_clean$summary[, c("check", "status")],
+             res_broken$summary[, c("check", "status", "n_flagged")],
+             by = "check", suffixes = c("_clean", "_planted"), sort = FALSE)
+names(tbl) <- c("Check", "Clean data", "Planted errors", "Rows flagged")
+knitr::kable(tbl, align = "llll")
+```
+
+On clean data every check passes. With errors planted, every check fails, and the tests
+confirm each rule check flagged **exactly** the planted rows, no more and no fewer.
+
+### Seeing the tagging bias
+
+The bias check asks one question: across pitchers, does the share of pitches that got
+tagged depend on how hard they throw? On clean data it doesn't. On the planted data,
+harder throwers are tagged less, planted strongly so it is easy to see. (On the real
+archive this check passes; see above.)
+
+```{r tag-bias, fig.height=3.4}
+per_pitcher <- function(d, label) {
+  p <- d$pitches
+  p <- p[!is.na(p$rel_speed_mph) & p$rel_speed_mph >= 30 & p$rel_speed_mph <= 105, ]
+  x <- data.frame(
+    n = as.vector(table(p$tracker_id)),
+    tag_rate = as.vector(tapply(!is.na(p$pitch_type), p$tracker_id, mean)),
+    velo = as.vector(tapply(p$rel_speed_mph, p$tracker_id, median))
+  )
+  x <- x[x$n >= 20, ]
+  x$panel <- sprintf("%s (r = %.2f)", label, cor(x$tag_rate, x$velo))
+  x
+}
+d <- rbind(per_pitcher(clean, "Clean data"), per_pitcher(broken, "Planted bias"))
+d$panel <- factor(d$panel, levels = unique(d$panel))
+ggplot(d, aes(velo, tag_rate)) +
+  geom_point(colour = blue, size = 1.8, alpha = 0.75, stroke = 0) +
+  geom_smooth(method = "lm", se = FALSE, colour = ink, linewidth = 0.6) +
+  facet_wrap(~panel) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(title = "Faster pitchers tagged less: the bias check flags the right panel",
+       x = "Pitcher's median velocity (mph)", y = "Pitches tagged") +
+  theme_report
+```
+
+## How often are the statistical checks wrong?
+
+Most checks are rules: a duplicate is a duplicate. Two of them are judgments made from
+noisy data, so on any one dataset they can be wrong. Rather than trust a single run, they
+were run on `r rates$n_facilities` simulated facilities, with and without a planted problem.
+
+- **Tagging bias:** false alarm on clean data `r sprintf("%.1f%%", 100 * rates$tag_missingness$false_alarm_rate)`
+  of the time; planted bias caught `r sprintf("%.0f%%", 100 * rates$tag_missingness$detection_rate)` of the time.
+- **Device drift:** how often a drifting force plate is flagged, by size of the drift:
+
+```{r drift-curve, fig.height=3.2}
+dd <- as.data.frame(rates$device_drift)
+ggplot(dd, aes(drift, flagged_rate)) +
+  geom_hline(yintercept = 0.8, colour = "#c3c2b7", linewidth = 0.4, linetype = "dashed") +
+  annotate("text", x = 0, y = 0.84, label = "80% detection", hjust = 0, size = 3.2, colour = ink) +
+  geom_line(colour = orange, linewidth = 0.9) +
+  geom_point(colour = orange, size = 2.6) +
+  geom_text(aes(label = scales::percent(flagged_rate, accuracy = 1)),
+            vjust = -1, size = 3.2, colour = ink) +
+  scale_x_continuous(labels = function(x) ifelse(x == 0, "none", paste0("+", 100 * x, "%")),
+                     breaks = dd$drift) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1.12), breaks = seq(0, 1, .25)) +
+  labs(title = "Big drifts are caught; small ones are not",
+       x = "Size of the force-plate drift", y = "Facilities where it was flagged") +
+  theme_report
+```
+
+```{r drift-table}
+knitr::kable(data.frame(Drift = ifelse(dd$drift == 0, "none", paste0("+", 100 * dd$drift, "%")),
+                        `Flagged` = scales::percent(dd$flagged_rate, accuracy = 0.1),
+                        check.names = FALSE), align = "lr")
+```
+
+**What that means:** with this facility's testing volume, the drift check never cries wolf
+but only reliably catches drifts of about 15% or more. A smaller calibration problem needs
+a different tool, such as a scheduled reference test on each plate, not a smarter formula.
+Knowing a check's limits is part of the check.
+
+## Limitations
+
+- The simulator is built from what the real data looked like; a failure nobody has seen
+  yet has no check until it happens once.
+- The real run showed where the simulated shape was wrong: two force tests (hop test and
+  mid-thigh pull) are run as one or two trials, not three, so the short-test count above
+  covers the three-trial tests only. It also found two bugs in the checks themselves (a
+  crash on an empty table, and rows with no pitch id counted as one duplicate). Each now
+  has a test.
+- Range-of-motion measurements are hand-entered and were not part of the archive run.
+- The physical limits and drift thresholds are judgment calls, kept in one settings file
+  so they can be argued about and changed in one place.
+
+## Code
+
+All code and tests are in this project's folder: the simulator (`synthetic/`), the checks
+(`13-data-quality/R/` and `sql/`), and the tests (`13-data-quality/tests/`).

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs the privacy scan before every commit. Enable once per clone with:
+#   git config core.hooksPath tools/hooks
+RSCRIPT="Rscript"
+if ! command -v Rscript >/dev/null 2>&1; then
+  RSCRIPT="/c/Program Files/R/R-4.5.3/bin/Rscript.exe"
+fi
+"$RSCRIPT" --vanilla tools/privacy_scan.R || {
+  echo "Commit blocked by the privacy scan. Fix the lines above and commit again."
+  exit 1
+}

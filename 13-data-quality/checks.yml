@@ -1,0 +1,30 @@
+# Every threshold the checks use lives here, not in code.
+
+local_timezone: America/Chicago
+
+dates:
+  earliest_valid: "2016-01-01"      # nothing in the archive predates the tracker's install
+  latest_valid: "2026-09-30"        # the "as of" date of a run; nothing may be later
+
+limits:                              # physically possible ranges, not typical ones
+  rel_speed_mph: [30, 105]
+  spin_rpm: [0, 4000]
+  jump_height_in: [0, 40]
+  rom_degrees: [0, 200]
+
+empty_columns:
+  max_null_share: 0.99               # a column at least 99% empty is flagged
+
+force_sessions:
+  expected_trials: 3                 # protocol: three trials per test
+
+tag_missingness:
+  min_pitches_per_pitcher: 20        # pitchers with fewer pitches are left out
+  min_pitchers: 30                   # too few pitchers -> check reports "not enough data"
+  max_abs_correlation: 0.25          # |r| between a pitcher's tag rate and median velo
+
+device_drift:
+  recent_days: 120                   # compare each device's last N days with its earlier data
+  min_sessions_each_window: 20
+  min_t: 3.0                         # standardized shift that counts as real
+  min_shift_in: 0.75                 # ...and is also large enough to matter

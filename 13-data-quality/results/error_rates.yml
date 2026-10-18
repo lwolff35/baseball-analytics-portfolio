@@ -1,0 +1,17 @@
+n_facilities: 200
+tag_missingness:
+  false_alarm_rate: 0.01
+  detection_rate: 1.0
+device_drift:
+  drift:
+  - 0.0
+  - 0.05
+  - 0.1
+  - 0.15
+  - 0.2
+  flagged_rate:
+  - 0.0
+  - 0.08
+  - 0.5
+  - 0.87
+  - 0.995
